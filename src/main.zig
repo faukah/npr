@@ -125,33 +125,37 @@ fn printSimpleOutput(
     }) catch return stdout.err.?;
     stdout.interface.flush() catch return;
 
-    if (pr.status == .merged) {
-        if (reached.len > 0) {
-            stdout.interface.print("   {s}└─{s} Reachable in: ", .{ Color.dim, Color.reset }) catch return stdout.err.?;
-            for (reached, 0..) |branch, i| {
-                if (i > 0) stdout.interface.print(
+    if (pr.status != .merged)
+        return;
+
+    if (reached.len > 0) {
+        stdout.interface.print(
+            "   {s}└─{s} Reachable in: ",
+            .{ Color.dim, Color.reset },
+        ) catch return stdout.err.?;
+
+        for (reached, 0..) |branch, i| {
+            if (i > 0)
+                stdout.interface.print(
                     "{s},{s} ",
                     .{ Color.dim, Color.reset },
                 ) catch return stdout.err.?;
-                stdout.interface.print(
-                    "{s}{s}{s}",
-                    .{ Color.bright_green, branch, Color.reset },
-                ) catch return stdout.err.?;
-                stdout.interface.flush() catch return;
-            }
-            stdout.interface.print("\n", .{}) catch return stdout.err.?;
-        } else {
-            stdout.interface.print("   {s}└─{s} Reachable in: {s}None{s} {s}(pending Hydra/Mirror){s}\n", .{
-                Color.dim,
-                Color.reset,
-                Color.yellow,
-                Color.reset,
-                Color.dim,
-                Color.reset,
-            }) catch return stdout.err.?;
-            stdout.interface.flush() catch return;
+
+            stdout.interface.print("{s}{s}{s}", .{ Color.bright_green, branch, Color.reset }) catch return stdout.err.?;
         }
+
+        stdout.interface.print("\n", .{}) catch return stdout.err.?;
+    } else {
+        stdout.interface.print("   {s}└─{s} Reachable in: {s}None{s} {s}(pending Hydra/Mirror){s}\n", .{
+            Color.dim,
+            Color.reset,
+            Color.yellow,
+            Color.reset,
+            Color.dim,
+            Color.reset,
+        }) catch return stdout.err.?;
     }
+    stdout.interface.flush() catch return;
 }
 
 fn computeReachability(
@@ -191,8 +195,6 @@ fn printTreeOutput(
     stdout: *std.fs.File.Writer,
     pr: github.PullRequest,
     reached_set: std.StringHashMap(void),
-    base_branch: []const u8,
-    indent: usize,
 ) !void {
     const status_str = switch (pr.status) {
         .open => "open",
@@ -200,36 +202,36 @@ fn printTreeOutput(
         .merged => "merged",
     };
 
-    if (indent == 0) {
-        stdout.interface.print(
-            "PR: {s} ({s}) #{d}\n",
-            .{ pr.title, status_str, pr.number },
-        ) catch return stdout.err.?;
-    }
-
-    // Print current branch
-    const spaces = "                                        ";
-    const indent_str = spaces[0..@min(indent, spaces.len)];
-
-    const in_branch = reached_set.contains(base_branch);
-    const status_icon = if (in_branch) "✓" else "✗";
-
     stdout.interface.print(
-        "{s}{s} {s}\n",
-        .{ indent_str, status_icon, base_branch },
+        "PR: {s} ({s}) #{d}\n",
+        .{ pr.title, status_str, pr.number },
     ) catch return stdout.err.?;
 
-    // Get next branches
-    const next = try branches.nextBranches(allocator, base_branch);
+    try printBranchTree(allocator, stdout, reached_set, pr.base_branch, 0);
+    stdout.interface.flush() catch return;
+}
+
+fn printBranchTree(
+    allocator: std.mem.Allocator,
+    stdout: *std.fs.File.Writer,
+    reached_set: std.StringHashMap(void),
+    branch: []const u8,
+    indent: usize,
+) !void {
+    const status_icon = if (reached_set.contains(branch)) "✓" else "✗";
+
+    try stdout.interface.splatByteAll(' ', indent);
+    stdout.interface.print("{s} {s}\n", .{ status_icon, branch }) catch return stdout.err.?;
+
+    const next = try branches.nextBranches(allocator, branch);
     defer {
         for (next) |n| allocator.free(n);
         allocator.free(next);
     }
 
     for (next) |next_branch| {
-        try printTreeOutput(allocator, stdout, pr, reached_set, next_branch, indent + 2);
+        try printBranchTree(allocator, stdout, reached_set, next_branch, indent + 2);
     }
-    stdout.interface.flush() catch return;
 }
 
 pub fn main() !void {
@@ -355,7 +357,7 @@ pub fn main() !void {
 
             _ = try computeReachability(allocator, &reached_set, pr.base_branch);
 
-            try printTreeOutput(allocator, &stdout, pr, reached_set, pr.base_branch, 0);
+            try printTreeOutput(allocator, &stdout, pr, reached_set);
             stdout.interface.print("\n", .{}) catch return stdout.err.?;
             stdout.interface.flush() catch return;
         } else {
