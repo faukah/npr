@@ -4,8 +4,8 @@ A small handy tool to track GitHub pull requests targeting a package in nixpkgs 
 
 Requires the GitHub CLI (`gh`) to be installed and authenticated.
 
-
 # Installation
+
 The flake exports `npr` as both a package and an app.
 If you need this you know how to install it.
 
@@ -71,5 +71,6 @@ Examples:
   npr --days 30 --tree python311
 ```
 
-# License: 
+# License:
+
 GPL or GTFO

@@ -25,10 +25,50 @@ pub const PullRequest = struct {
 pub const GitHubClient = struct {
     allocator: std.mem.Allocator,
 
+    pub const ValidationError = error{
+        GhNotInstalled,
+        GhNotAuthenticated,
+    };
+
     pub fn init(allocator: std.mem.Allocator) GitHubClient {
         return .{
             .allocator = allocator,
         };
+    }
+
+    /// Check if gh CLI is installed and authenticated
+    pub fn validate(self: *GitHubClient) ValidationError!void {
+        // Check if gh is installed by running 'gh --version'
+        const version_argv = [_][]const u8{ "gh", "--version" };
+        const version_result = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &version_argv,
+            .max_output_bytes = 4096,
+        }) catch {
+            return error.GhNotInstalled;
+        };
+        self.allocator.free(version_result.stdout);
+        self.allocator.free(version_result.stderr);
+
+        if (version_result.term.Exited != 0) {
+            return error.GhNotInstalled;
+        }
+
+        // Check if gh is authenticated by running 'gh auth status'
+        const auth_argv = [_][]const u8{ "gh", "auth", "status" };
+        const auth_result = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &auth_argv,
+            .max_output_bytes = 4096,
+        }) catch {
+            return error.GhNotAuthenticated;
+        };
+        self.allocator.free(auth_result.stdout);
+        self.allocator.free(auth_result.stderr);
+
+        if (auth_result.term.Exited != 0) {
+            return error.GhNotAuthenticated;
+        }
     }
 
     pub fn searchPRsByChangedFiles(

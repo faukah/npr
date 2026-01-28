@@ -244,11 +244,31 @@ pub fn main() !void {
 
     const config = try parseArgs(allocator, &stdout, &stderr) orelse return;
 
-    stdout.interface.print("Searching for {s}...\n", .{config.package_name}) catch return stdout.err.?;
-    stdout.interface.flush() catch return;
-
     // Initialize GitHub client
     var gh_client = github.GitHubClient.init(allocator);
+
+    // Validate gh CLI is installed and authenticated
+    gh_client.validate() catch |err| switch (err) {
+        error.GhNotInstalled => {
+            stderr.interface.print(
+                "Error: GitHub CLI (gh) is not installed.\nInstall it from https://cli.github.com/\n",
+                .{},
+            ) catch return stderr.err.?;
+            stderr.interface.flush() catch return;
+            return err;
+        },
+        error.GhNotAuthenticated => {
+            stderr.interface.print(
+                "Error: GitHub CLI is not authenticated.\nRun 'gh auth login' to authenticate.\n",
+                .{},
+            ) catch return stderr.err.?;
+            stderr.interface.flush() catch return;
+            return err;
+        },
+    };
+
+    stdout.interface.print("Searching for {s}...\n", .{config.package_name}) catch return stdout.err.?;
+    stdout.interface.flush() catch return;
 
     // Search for PRs
     const prs = gh_client.searchPRsByChangedFiles(allocator, config.package_name, config.days) catch |err| {
