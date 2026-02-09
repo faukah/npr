@@ -1,6 +1,7 @@
 const std = @import("std");
-const github = @import("github.zig");
+
 const branches = @import("branches.zig");
+const github = @import("github.zig");
 
 const Color = struct {
     const reset = "\x1b[0m";
@@ -16,10 +17,37 @@ const Color = struct {
     const bright_green = "\x1b[92m";
 };
 
-const Config = struct {
-    package_name: []const u8,
+const ParseOptions = struct {
+    /// The package name to search for in changed files of PRs.
+    package_name: []const u8 = undefined,
+
+    /// Days to search back, the default is 15.
     days: u32 = 15,
+
+    /// Show the detailed branch tree for each PR instead of a simple list of reachable branches.
     show_tree: bool = false,
+
+    show_help: bool = false,
+
+    diagnostics: ?union(enum) {
+        /// Invalid package name.
+        invalid_package_name: []const u8,
+
+        /// Invalid days. Must be a positive integer.
+        invalid_days: []const u8,
+
+        /// Invalid boolean passed.for `--tree`.
+        invalid_tree: []const u8,
+
+        /// Unknown option supplied
+        unknown_option: []const u8,
+
+        /// Multiple package names supplied.
+        multiple_package_names: []const u8,
+
+        /// No package name supplied
+        no_package_name: []const u8,
+    } = null,
 };
 
 fn printUsage(stdout: *std.fs.File.Writer, prog_name: []const u8) !void {
@@ -45,64 +73,54 @@ fn printUsage(stdout: *std.fs.File.Writer, prog_name: []const u8) !void {
     stdout.interface.flush() catch return;
 }
 
-fn parseArgs(allocator: std.mem.Allocator, stdout: *std.fs.File.Writer, stderr: *std.fs.File.Writer) !?Config {
+fn parseArgs(allocator: std.mem.Allocator) !ParseOptions {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    const prog_name = args.next() orelse "npr";
-
-    var config = Config{
-        .package_name = undefined,
-    };
-
+    var options: ParseOptions = .{};
     var has_package = false;
+
+    // Skip package name
+    _ = args.skip();
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try printUsage(stdout, prog_name);
-            return null;
-        } else if (std.mem.eql(u8, arg, "--days")) {
+            options.show_help = true;
+        } else if (std.mem.eql(u8, arg, "--days") or std.mem.eql(u8, arg, "-d")) {
             const days_str = args.next() orelse {
-                stderr.interface.print(
-                    "Error: --days requires a value\n",
-                    .{},
-                ) catch return stderr.err.?;
-                return error.InvalidArgs;
+                options.diagnostics = .{ .invalid_days = "No days value supplied" };
+                break;
             };
-            config.days = std.fmt.parseInt(u32, days_str, 10) catch {
-                stderr.interface.print("Error: invalid days value: {s}\n", .{days_str}) catch return stderr.err.?;
-                return error.InvalidArgs;
+            options.days = std.fmt.parseInt(u32, days_str, 10) catch {
+                const message = try std.fmt.allocPrint(allocator, "Invalid value for --days: {s}", .{days_str});
+                options.diagnostics = .{ .invalid_days = message };
+                break;
             };
-        } else if (std.mem.eql(u8, arg, "--tree")) {
-            config.show_tree = true;
+        } else if (std.mem.eql(u8, arg, "--tree") or std.mem.eql(u8, arg, "-t")) {
+            options.show_tree = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
-            stderr.interface.print(
-                "Error: unknown option: {s}\n",
-                .{arg},
-            ) catch return stderr.err.?;
-            try printUsage(stdout, prog_name);
-            return error.InvalidArgs;
+            const message = try std.fmt.allocPrint(allocator, "unknown option: {s}", .{arg});
+            options.diagnostics = .{ .unknown_option = message };
+            break;
         } else {
             if (has_package) {
-                stderr.interface.print("Error: multiple package names provided\n", .{}) catch return stderr.err.?;
-                return error.InvalidArgs;
+                options.diagnostics = .{ .multiple_package_names = "multiple package names provided." };
+                break;
             }
-            config.package_name = arg;
+            options.package_name = arg;
             has_package = true;
         }
-    }
 
-    if (!has_package) {
-        stderr.interface.print("Error: package name required\n\n", .{}) catch return stderr.err.?;
-        try printUsage(stdout, prog_name);
-        return error.InvalidArgs;
+        if (!has_package) {
+            options.diagnostics = .{ .no_package_name = "package name required." };
+            break;
+        }
     }
-
-    return config;
+    return options;
 }
 
 fn printSimpleOutput(
-    stdout: *std.fs.File.Writer,
+    stdout: *std.Io.Writer,
     pr: github.PullRequest,
     reached: []const []const u8,
 ) !void {
@@ -112,7 +130,7 @@ fn printSimpleOutput(
         .merged => Color.green ++ "merged" ++ Color.reset,
     };
 
-    stdout.interface.print("{s}PR:{s} {s}{s}{s} ({s}) {s}#{d}{s}\n", .{
+    try stdout.print("{s}PR:{s} {s}{s}{s} ({s}) {s}#{d}{s}\n", .{
         Color.bold,
         Color.reset,
         Color.cyan,
@@ -122,40 +140,34 @@ fn printSimpleOutput(
         Color.dim,
         pr.number,
         Color.reset,
-    }) catch return stdout.err.?;
-    stdout.interface.flush() catch return;
+    });
+    try stdout.flush();
 
     if (pr.status != .merged)
         return;
 
     if (reached.len > 0) {
-        stdout.interface.print(
-            "   {s}└─{s} Reachable in: ",
-            .{ Color.dim, Color.reset },
-        ) catch return stdout.err.?;
+        try stdout.print("   {s}└─{s} Reachable in: ", .{ Color.dim, Color.reset });
 
         for (reached, 0..) |branch, i| {
             if (i > 0)
-                stdout.interface.print(
-                    "{s},{s} ",
-                    .{ Color.dim, Color.reset },
-                ) catch return stdout.err.?;
+                try stdout.print("{s},{s} ", .{ Color.dim, Color.reset });
 
-            stdout.interface.print("{s}{s}{s}", .{ Color.bright_green, branch, Color.reset }) catch return stdout.err.?;
+            try stdout.print("{s}{s}{s}", .{ Color.bright_green, branch, Color.reset });
         }
 
-        stdout.interface.print("\n", .{}) catch return stdout.err.?;
+        try stdout.print("\n", .{});
     } else {
-        stdout.interface.print("   {s}└─{s} Reachable in: {s}None{s} {s}(pending Hydra/Mirror){s}\n", .{
+        try stdout.print("   {s}└─{s} Reachable in: {s}None{s} {s}(pending Hydra/Mirror){s}\n", .{
             Color.dim,
             Color.reset,
             Color.yellow,
             Color.reset,
             Color.dim,
             Color.reset,
-        }) catch return stdout.err.?;
+        });
     }
-    stdout.interface.flush() catch return;
+    stdout.flush() catch return;
 }
 
 fn computeReachability(
@@ -192,7 +204,7 @@ fn computeReachability(
 
 fn printTreeOutput(
     allocator: std.mem.Allocator,
-    stdout: *std.fs.File.Writer,
+    stdout: *std.Io.Writer,
     pr: github.PullRequest,
     reached_set: std.StringHashMap(void),
 ) !void {
@@ -202,26 +214,23 @@ fn printTreeOutput(
         .merged => "merged",
     };
 
-    stdout.interface.print(
-        "PR: {s} ({s}) #{d}\n",
-        .{ pr.title, status_str, pr.number },
-    ) catch return stdout.err.?;
+    try stdout.print("PR: {s} ({s}) #{d}\n", .{ pr.title, status_str, pr.number });
 
     try printBranchTree(allocator, stdout, reached_set, pr.base_branch, 0);
-    stdout.interface.flush() catch return;
+    try stdout.flush();
 }
 
 fn printBranchTree(
     allocator: std.mem.Allocator,
-    stdout: *std.fs.File.Writer,
+    stdout: *std.Io.Writer,
     reached_set: std.StringHashMap(void),
     branch: []const u8,
     indent: usize,
 ) !void {
     const status_icon = if (reached_set.contains(branch)) "✓" else "✗";
 
-    try stdout.interface.splatByteAll(' ', indent);
-    stdout.interface.print("{s} {s}\n", .{ status_icon, branch }) catch return stdout.err.?;
+    try stdout.splatByteAll(' ', indent);
+    try stdout.print("{s} {s}\n", .{ status_icon, branch });
 
     const next = try branches.nextBranches(allocator, branch);
     defer {
@@ -239,52 +248,50 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var stdout_buf: [4096]u8 = undefined;
-    var stderr_buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
-    var stderr = std.fs.File.stderr().writer(&stderr_buf);
+    var io_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(io_buf[0 .. io_buf.len / 2]);
+    var stderr_writer = std.fs.File.stderr().writer(io_buf[io_buf.len / 2 ..]);
+    var stderr = &stderr_writer.interface;
+    var stdout = &stdout_writer.interface;
 
-    const config = try parseArgs(allocator, &stdout, &stderr) orelse return;
+    const config = try parseArgs(allocator);
 
+    if (config.diagnostics) |diag| {
+        switch (diag) {
+            inline else => |message| try stderr.print("Error: {s}\n", .{message}),
+        }
+        try stderr.flush();
+    }
     // Initialize GitHub client
     var gh_client = github.GitHubClient.init(allocator);
 
     // Validate gh CLI is installed and authenticated
     gh_client.validate() catch |err| switch (err) {
         error.GhNotInstalled => {
-            stderr.interface.print(
-                "Error: GitHub CLI (gh) is not installed.\nInstall it from https://cli.github.com/\n",
-                .{},
-            ) catch return stderr.err.?;
-            stderr.interface.flush() catch return;
+            try stderr.print("Error: GitHub CLI (gh) is not installed.\nInstall it from https://cli.github.com/\n", .{});
+            try stderr.flush();
             return err;
         },
         error.GhNotAuthenticated => {
-            stderr.interface.print(
-                "Error: GitHub CLI is not authenticated.\nRun 'gh auth login' to authenticate.\n",
-                .{},
-            ) catch return stderr.err.?;
-            stderr.interface.flush() catch return;
+            try stderr.print("Error: GitHub CLI is not authenticated.\nRun 'gh auth login' to authenticate.\n", .{});
+            try stderr.flush();
             return err;
         },
     };
 
-    stdout.interface.print("Searching for {s}...\n", .{config.package_name}) catch return stdout.err.?;
-    stdout.interface.flush() catch return;
+    try stdout.print("Searching for {s}...\n", .{config.package_name});
+    try stdout.flush();
 
     // Search for PRs
     const prs = gh_client.searchPRsByChangedFiles(allocator, config.package_name, config.days) catch |err| {
-        stderr.interface.print("Error searching GitHub: {}\n", .{err}) catch return stdout.err.?;
-        stderr.interface.flush() catch return;
+        try stderr.print("Error searching GitHub: {}\n", .{err});
+        try stderr.flush();
         return err;
     };
 
     if (prs.len == 0) {
-        stderr.interface.print(
-            "No PRs found for '{s}' in the last {d} days.\n",
-            .{ config.package_name, config.days },
-        ) catch return stdout.err.?;
-        stderr.interface.flush() catch return;
+        try stderr.print("No PRs found for '{s}' in the last {d} days.\n", .{ config.package_name, config.days });
+        try stderr.flush();
         return;
     }
 
@@ -306,10 +313,10 @@ pub fn main() !void {
 
     // Process each PR sequentially
     for (prs, 0..) |pr, idx| {
-        stdout.interface.print(
+        try stdout.print(
             "\r[{d}/{d}] ",
             .{ idx + 1, prs.len },
-        ) catch return stdout.err.?;
+        );
 
         var reached_branches: [][]const u8 = &.{};
         defer {
@@ -328,7 +335,7 @@ pub fn main() !void {
         }
 
         // Clear progress line
-        stdout.interface.print("\r{s}\r", .{" " ** 50}) catch return stdout.err.?;
+        try stdout.print("\r{s}\r", .{" " ** 50});
 
         if (config.show_tree) {
             var reached_set = std.StringHashMap(void).init(allocator);
@@ -357,11 +364,11 @@ pub fn main() !void {
 
             _ = try computeReachability(allocator, &reached_set, pr.base_branch);
 
-            try printTreeOutput(allocator, &stdout, pr, reached_set);
-            stdout.interface.print("\n", .{}) catch return stdout.err.?;
-            stdout.interface.flush() catch return;
+            try printTreeOutput(allocator, stdout, pr, reached_set);
+            try stdout.print("\n", .{});
+            try stdout.flush();
         } else {
-            try printSimpleOutput(&stdout, pr, reached_branches);
+            try printSimpleOutput(stdout, pr, reached_branches);
         }
     }
 }

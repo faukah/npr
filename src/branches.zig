@@ -24,14 +24,12 @@ pub fn nextBranches(allocator: std.mem.Allocator, branch: []const u8) ![][]const
         result.deinit(allocator);
     }
 
-    for (branch_mappings) |mapping| {
-        if (try matchesPattern(branch, mapping.pattern)) {
+    for (branch_mappings) |mapping|
+        if (try matchesPattern(branch, mapping.pattern))
             for (mapping.nexts) |next_pattern| {
                 const expanded = try expandPattern(allocator, branch, mapping.pattern, next_pattern);
                 try result.append(allocator, expanded);
-            }
-        }
-    }
+            };
 
     return try result.toOwnedSlice(allocator);
 }
@@ -58,30 +56,26 @@ fn matchesPattern(branch: []const u8, pattern: []const u8) !bool {
 }
 
 fn simpleRegexMatch(text: []const u8, pattern: []const u8) !bool {
-    // Handle staging-next-XX.XX pattern
     if (std.mem.eql(u8, pattern, "staging-next-([\\d.]+)")) {
         if (!std.mem.startsWith(u8, text, "staging-next-")) return false;
         const suffix = text["staging-next-".len..];
         return isVersionNumber(suffix);
     }
 
-    // Handle release-XX.XX pattern
     if (std.mem.eql(u8, pattern, "release-([\\d.]+)")) {
         if (!std.mem.startsWith(u8, text, "release-")) return false;
         const suffix = text["release-".len..];
         return isVersionNumber(suffix);
     }
 
-    // Handle nixos-XXX-small pattern
     if (std.mem.eql(u8, pattern, "nixos-(.*)-small")) {
         return std.mem.startsWith(u8, text, "nixos-") and std.mem.endsWith(u8, text, "-small");
     }
 
-    // Handle staging-XX.XX patterns (new releases 21+)
     if (std.mem.eql(u8, pattern, "staging-((2[1-9]|[3-90].)\\.\\d{2})")) {
         if (!std.mem.startsWith(u8, text, "staging-")) return false;
         const suffix = text["staging-".len..];
-        if (suffix.len != 5) return false; // Must be XX.XX
+        if (suffix.len != 5) return false;
         if (suffix[2] != '.') return false;
 
         const first_two = suffix[0..2];
@@ -101,7 +95,6 @@ fn isVersionNumber(s: []const u8) bool {
 }
 
 fn expandPattern(allocator: std.mem.Allocator, text: []const u8, pattern: []const u8, replacement: []const u8) ![]const u8 {
-    // Extract capture group from text based on pattern
     if (std.mem.indexOf(u8, replacement, "$1")) |_| {
         const capture = try extractCapture(text, pattern);
         return try std.mem.replaceOwned(u8, allocator, replacement, "$1", capture);
@@ -111,29 +104,24 @@ fn expandPattern(allocator: std.mem.Allocator, text: []const u8, pattern: []cons
 }
 
 fn extractCapture(text: []const u8, pattern: []const u8) ![]const u8 {
-    // Strip anchors from pattern for comparison
     var pat = pattern;
     if (std.mem.startsWith(u8, pat, "^")) pat = pat[1..];
     if (std.mem.endsWith(u8, pat, "$")) pat = pat[0 .. pat.len - 1];
 
-    // Handle staging-next-XX.XX pattern
     if (std.mem.eql(u8, pat, "staging-next-([\\d.]+)")) {
         return text["staging-next-".len..];
     }
 
-    // Handle release-XX.XX pattern
     if (std.mem.eql(u8, pat, "release-([\\d.]+)")) {
         return text["release-".len..];
     }
 
-    // Handle nixos-XXX-small pattern
     if (std.mem.eql(u8, pat, "nixos-(.*)-small")) {
         const start = "nixos-".len;
         const end = text.len - "-small".len;
         return text[start..end];
     }
 
-    // Handle staging-XX.XX patterns
     if (std.mem.indexOf(u8, pat, "staging-((") != null) {
         return text["staging-".len..];
     }
@@ -141,7 +129,6 @@ fn extractCapture(text: []const u8, pattern: []const u8) ![]const u8 {
     return "";
 }
 
-/// Get all candidate branches that we track
 pub fn allTrackedBranches(allocator: std.mem.Allocator) ![][]const u8 {
     var result = try std.ArrayList([]const u8).initCapacity(allocator, 3);
     errdefer {
@@ -149,7 +136,6 @@ pub fn allTrackedBranches(allocator: std.mem.Allocator) ![][]const u8 {
         result.deinit(allocator);
     }
 
-    // Only track the three unstable branches
     const unstable_branches = [_][]const u8{
         "nixpkgs-unstable",
         "nixos-unstable",
