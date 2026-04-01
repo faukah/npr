@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Io = std.Io;
+
 const branches = @import("branches.zig");
 const github = @import("github.zig");
 
@@ -50,8 +52,8 @@ const ParseOptions = struct {
     } = null,
 };
 
-fn printUsage(stdout: *std.fs.File.Writer, prog_name: []const u8) !void {
-    stdout.interface.print(
+fn printUsage(stdout: *std.Io.Writer, prog_name: []const u8) !void {
+    try stdout.print(
         \\Usage: {s} [options] <package-name>
         \\
         \\Search for recent NixOS PRs affecting a package and show which branches they've reached.
@@ -69,18 +71,16 @@ fn printUsage(stdout: *std.fs.File.Writer, prog_name: []const u8) !void {
         \\
     ,
         .{ prog_name, prog_name, prog_name },
-    ) catch return stdout.err.?;
-    stdout.interface.flush() catch return;
+    );
+    try stdout.flush();
 }
 
-fn parseArgs(allocator: std.mem.Allocator) !ParseOptions {
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-
+fn parseArgs(allocator: std.mem.Allocator, _args: std.process.Args) !ParseOptions {
+    var args = try _args.iterateAllocator(allocator);
     var options: ParseOptions = .{};
     var has_package = false;
 
-    // Skip package name
+    // Skip program name
     _ = args.skip();
 
     while (args.next()) |arg| {
@@ -110,11 +110,10 @@ fn parseArgs(allocator: std.mem.Allocator) !ParseOptions {
             options.package_name = arg;
             has_package = true;
         }
+    }
 
-        if (!has_package) {
-            options.diagnostics = .{ .no_package_name = "package name required." };
-            break;
-        }
+    if (options.diagnostics == null and !has_package) {
+        options.diagnostics = .{ .no_package_name = "package name required." };
     }
     return options;
 }
@@ -243,30 +242,42 @@ fn printBranchTree(
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     var io_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(io_buf[0 .. io_buf.len / 2]);
-    var stderr_writer = std.fs.File.stderr().writer(io_buf[io_buf.len / 2 ..]);
+
+    var stdout_writer = Io.File.stdout().writer(io, io_buf[0 .. io_buf.len / 2]);
+    var stderr_writer = Io.File.stderr().writer(io, io_buf[io_buf.len / 2 ..]);
     var stderr = &stderr_writer.interface;
     var stdout = &stdout_writer.interface;
 
-    const config = try parseArgs(allocator);
+    const config = try parseArgs(
+        allocator,
+        init.minimal.args,
+    );
 
     if (config.diagnostics) |diag| {
         switch (diag) {
-            inline else => |message| try stderr.print("Error: {s}\n", .{message}),
+            inline else => |message| {
+                try stderr.print("Error: {s}\n", .{message});
+                allocator.free(message);
+            },
         }
         try stderr.flush();
+        return;
+    }
+
+    if (config.show_help) {
+        try printUsage(stdout, "npr");
+        return;
     }
     // Initialize GitHub client
     var gh_client = github.GitHubClient.init(allocator);
 
     // Validate gh CLI is installed and authenticated
-    gh_client.validate() catch |err| switch (err) {
+    gh_client.validate(io) catch |err| switch (err) {
         error.GhNotInstalled => {
             try stderr.print("Error: GitHub CLI (gh) is not installed.\nInstall it from https://cli.github.com/\n", .{});
             try stderr.flush();
@@ -283,7 +294,7 @@ pub fn main() !void {
     try stdout.flush();
 
     // Search for PRs
-    const prs = gh_client.searchPRsByChangedFiles(allocator, config.package_name, config.days) catch |err| {
+    const prs = gh_client.searchPRsByChangedFiles(io, config.package_name, config.days) catch |err| {
         try stderr.print("Error searching GitHub: {}\n", .{err});
         try stderr.flush();
         return err;
@@ -327,6 +338,7 @@ pub fn main() !void {
         // For merged PRs, check which branches contain the merge commit
         if (pr.status == .merged and pr.merge_commit_sha != null) {
             reached_branches = gh_client.branchesContainingCommit(
+                io,
                 tracked,
                 pr.merge_commit_sha.?,
             ) catch blk: {
