@@ -1,21 +1,11 @@
 {
   inputs = {
     nixpkgs.url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz";
-    zig-overlay = {
-      url = "github:mitchellh/zig-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    zls = {
-      url = "github:zigtools/zls";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
     {
       nixpkgs,
-      zig-overlay,
-      zls,
       self,
     }:
     let
@@ -26,10 +16,7 @@
     in
     {
       devShells = eachSystem (system: {
-        default = pkgsFor.${system}.callPackage ./shell.nix {
-          zig = (zig-overlay.packages.${system}.master);
-          inherit (zls.packages.${system}) zls;
-        };
+        default = pkgsFor.${system}.callPackage ./shell.nix { };
       });
 
       packages = eachSystem (system: {
