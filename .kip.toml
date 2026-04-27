@@ -1,0 +1,2 @@
+[nix.lockfile_maintenance]
+enable = true
