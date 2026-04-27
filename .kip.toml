@@ -1,2 +1,6 @@
+[nix]
+enable = true
+
 [nix.lockfile_maintenance]
 enable = true
+commit_message = "flake.lock: bump inputs"
