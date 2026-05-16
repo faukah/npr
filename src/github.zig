@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const Io = std.Io;
-
 pub const PullRequestStatus = enum {
     open,
     closed,
@@ -24,287 +22,211 @@ pub const PullRequest = struct {
     }
 };
 
+const json_options: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+
+const SearchResponse = struct {
+    items: []const struct { number: i64 },
+};
+
+const CompareResponse = struct {
+    status: []const u8,
+};
+
+const PullResponse = struct {
+    number: i64,
+    title: []const u8,
+    state: []const u8,
+    merged: bool,
+    merge_commit_sha: ?[]const u8,
+    merged_at: ?[]const u8,
+    base: struct { ref: []const u8 },
+};
+
 pub const GitHubClient = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
 
     pub const ValidationError = error{
         GhNotInstalled,
         GhNotAuthenticated,
     };
 
-    pub fn init(allocator: std.mem.Allocator) GitHubClient {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        environ_map: *std.process.Environ.Map,
+    ) !GitHubClient {
+        try sanitizeEnv(environ_map);
         return .{
             .allocator = allocator,
+            .io = io,
+            .environ_map = environ_map,
         };
     }
 
-    /// Check if gh CLI is installed and authenticated
-    pub fn validate(self: *GitHubClient, io: std.Io) ValidationError!void {
-        // Check if gh is installed by running 'gh --version'
-        const version_result = std.process.run(self.allocator, io, .{
-            .argv = &[_][]const u8{ "gh", "--version" },
-        }) catch return error.GhNotInstalled;
-
-        self.allocator.free(version_result.stdout);
-        self.allocator.free(version_result.stderr);
-
-        if (version_result.term.exited != 0) return error.GhNotInstalled;
-
-        // Check if gh is authenticated by running 'gh auth status'
-        const auth_result = std.process.run(self.allocator, io, .{
-            .argv = &[_][]const u8{ "gh", "auth", "status" },
-        }) catch return error.GhNotAuthenticated;
-
-        self.allocator.free(auth_result.stdout);
-        self.allocator.free(auth_result.stderr);
-
-        if (auth_result.term.exited != 0) return error.GhNotAuthenticated;
+    pub fn validate(self: *GitHubClient) ValidationError!void {
+        if (!self.commandSucceeds(&.{ "gh", "--version" })) return error.GhNotInstalled;
+        if (!self.commandSucceeds(&.{ "gh", "auth", "status" })) return error.GhNotAuthenticated;
     }
 
     pub fn searchPRsByChangedFiles(
         self: *GitHubClient,
-        io: std.Io,
         package_name: []const u8,
         days: u32,
     ) ![]PullRequest {
-        const clock: std.Io.Clock = .real;
-        const now = clock.now(io);
-        const days_ago = now.subDuration(.fromSeconds(days * 24 * 60 * 60));
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
+        const days_ago = now - (@as(i64, days) * std.time.s_per_day);
 
-        const date = try formatIsoDate(self.allocator, days_ago.toSeconds());
-        defer self.allocator.free(date);
+        var date_buffer: [20]u8 = undefined;
+        const date = try formatIsoDate(&date_buffer, days_ago);
 
-        const query = try std.fmt.allocPrint(
-            self.allocator,
-            "repo:NixOS/nixpkgs {s} type:pr created:>{s}",
-            .{ package_name, date },
-        );
-        defer self.allocator.free(query);
+        var endpoint: std.Io.Writer.Allocating = .init(self.allocator);
+        defer endpoint.deinit();
 
-        const encoded_query = try urlEncode(self.allocator, query);
-        defer self.allocator.free(encoded_query);
+        try endpoint.writer.writeAll("/search/issues?q=");
+        try writeUrlEncoded(&endpoint.writer, "repo:NixOS/nixpkgs ");
+        try writeUrlEncoded(&endpoint.writer, package_name);
+        try writeUrlEncoded(&endpoint.writer, " type:pr created:>");
+        try writeUrlEncoded(&endpoint.writer, date);
+        try endpoint.writer.writeAll("&per_page=100&sort=created&order=desc");
 
-        const endpoint = try std.fmt.allocPrint(
-            self.allocator,
-            "/search/issues?q={s}&per_page=100&sort=created&order=desc",
-            .{encoded_query},
-        );
-        defer self.allocator.free(endpoint);
-
-        const json_response = try self.makeRequest(io, endpoint);
+        const json_response = try self.makeRequest(endpoint.written());
         defer self.allocator.free(json_response);
 
-        return try self.parseSearchResults(io, json_response);
+        return try self.parseSearchResults(json_response);
     }
 
     pub fn checkCommitInBranch(
         self: *GitHubClient,
-        io: std.Io,
-        allocator: std.mem.Allocator,
         commit_sha: []const u8,
         branch: []const u8,
     ) !bool {
-        const endpoint = try std.fmt.allocPrint(
-            allocator,
+        var endpoint_buffer: [256]u8 = undefined;
+        const endpoint = std.fmt.bufPrint(
+            &endpoint_buffer,
             "/repos/NixOS/nixpkgs/compare/{s}...{s}",
             .{ commit_sha, branch },
-        );
-        defer allocator.free(endpoint);
+        ) catch return false;
 
-        const json_response = self.makeRequest(io, endpoint) catch {
-            return false;
-        };
+        const json_response = self.makeRequest(endpoint) catch return false;
         defer self.allocator.free(json_response);
 
-        const parsed = try std.json.parseFromSlice(
-            std.json.Value,
-            self.allocator,
-            json_response,
-            .{},
-        );
+        const parsed = try std.json.parseFromSlice(CompareResponse, self.allocator, json_response, json_options);
         defer parsed.deinit();
 
-        const obj = parsed.value.object;
-
-        if (obj.get("status")) |status_val| {
-            const status = status_val.string;
-            return std.mem.eql(u8, status, "ahead") or std.mem.eql(u8, status, "identical");
-        }
-
-        return false;
+        return std.mem.eql(u8, parsed.value.status, "ahead") or
+            std.mem.eql(u8, parsed.value.status, "identical");
     }
 
     pub fn branchesContainingCommit(
         self: *GitHubClient,
-        io: std.Io,
         candidates: []const []const u8,
         commit_sha: []const u8,
     ) ![][]const u8 {
-        if (candidates.len == 0) return &[_][]const u8{};
-
-        const BranchCheckContext = struct {
-            client: *GitHubClient,
-            commit_sha: []const u8,
-            branch: []const u8,
-            result: bool = false,
-        };
-
-        const contexts = try self.allocator.alloc(BranchCheckContext, candidates.len);
-        defer self.allocator.free(contexts);
-
-        for (contexts, 0..) |*ctx, i| {
-            ctx.* = .{
-                .client = self,
-                .commit_sha = commit_sha,
-                .branch = candidates[i],
-            };
-        }
-
-        var threads = try self.allocator.alloc(std.Thread, candidates.len);
-        defer self.allocator.free(threads);
-
-        const Worker = struct {
-            fn check(_io: std.Io, ctx: *BranchCheckContext) void {
-                ctx.result = ctx.client.checkCommitInBranch(
-                    _io,
-                    ctx.client.allocator,
-                    ctx.commit_sha,
-                    ctx.branch,
-                ) catch false;
-            }
-        };
-
-        for (0..candidates.len) |i| {
-            threads[i] = try std.Thread.spawn(.{}, Worker.check, .{ io, &contexts[i] });
-        }
-
-        for (threads) |thread| {
-            thread.join();
-        }
-
         var result = try std.ArrayList([]const u8).initCapacity(self.allocator, candidates.len);
         errdefer {
             for (result.items) |item| self.allocator.free(item);
             result.deinit(self.allocator);
         }
 
-        for (contexts) |ctx| {
-            if (ctx.result) {
-                const owned = try self.allocator.dupe(u8, ctx.branch);
-                try result.append(self.allocator, owned);
+        for (candidates) |branch| {
+            if (self.checkCommitInBranch(commit_sha, branch) catch false) {
+                try result.append(self.allocator, try self.allocator.dupe(u8, branch));
             }
         }
 
         return try result.toOwnedSlice(self.allocator);
     }
 
-    fn makeRequest(self: *GitHubClient, io: std.Io, endpoint: []const u8) ![]u8 {
-        const argv = [_][]const u8{
-            "gh",
-            "api",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "X-GitHub-Api-Version: 2022-11-28",
-            endpoint,
-        };
+    fn commandSucceeds(self: *GitHubClient, argv: []const []const u8) bool {
+        const result = std.process.run(self.allocator, self.io, .{
+            .argv = argv,
+            .environ_map = self.environ_map,
+            .stdout_limit = .limited(4096),
+            .stderr_limit = .limited(4096),
+        }) catch return false;
+        defer self.allocator.free(result.stdout);
+        defer self.allocator.free(result.stderr);
 
-        const result = std.process.run(self.allocator, io, .{
-            .argv = &argv,
-            .stdout_limit = Io.Limit.limited(10 * 1024 * 1024),
-            .environ_map = .init(self.allocator),
-        }) catch {
-            return error.GitHubRequestFailed;
-        };
+        return childSucceeded(result.term);
+    }
 
-        if (result.term.exited != 0) {
-            self.allocator.free(result.stdout);
-            self.allocator.free(result.stderr);
-            return error.GitHubRequestFailed;
-        }
+    fn makeRequest(self: *GitHubClient, endpoint: []const u8) ![]u8 {
+        const result = std.process.run(self.allocator, self.io, .{
+            .argv = &.{
+                "gh",
+                "api",
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-H",
+                "X-GitHub-Api-Version: 2022-11-28",
+                endpoint,
+            },
+            .environ_map = self.environ_map,
+            .stdout_limit = .limited(10 * 1024 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+        }) catch return error.GitHubRequestFailed;
+        errdefer self.allocator.free(result.stdout);
+        defer self.allocator.free(result.stderr);
 
-        self.allocator.free(result.stderr);
+        if (!childSucceeded(result.term)) return error.GitHubRequestFailed;
         return result.stdout;
     }
 
-    fn parseSearchResults(self: *GitHubClient, io: std.Io, json: []const u8) ![]PullRequest {
-        std.debug.print("{s}", .{json});
-        const parsed = try std.json.parseFromSlice(
-            std.json.Value,
-            self.allocator,
-            json,
-            .{},
-        );
+    fn parseSearchResults(self: *GitHubClient, json: []const u8) ![]PullRequest {
+        const parsed = try std.json.parseFromSlice(SearchResponse, self.allocator, json, json_options);
         defer parsed.deinit();
-        std.debug.print("{}", .{parsed});
 
-        const obj = parsed.value.object;
-        const items = obj.get("items").?.array;
-
-        var result = try std.ArrayList(PullRequest).initCapacity(self.allocator, items.items.len);
+        var result = try std.ArrayList(PullRequest).initCapacity(self.allocator, parsed.value.items.len);
         errdefer {
             for (result.items) |*pr| pr.deinit(self.allocator);
             result.deinit(self.allocator);
         }
 
-        for (items.items) |item| {
-            const number = item.object.get("number").?.integer;
-            const pr_details = try self.getPRDetails(io, number);
-            try result.append(self.allocator, pr_details);
+        for (parsed.value.items) |item| {
+            try result.append(self.allocator, try self.getPRDetails(item.number));
         }
 
         return try result.toOwnedSlice(self.allocator);
     }
 
-    fn getPRDetails(self: *GitHubClient, io: std.Io, pr_number: i64) !PullRequest {
-        const endpoint = try std.fmt.allocPrint(
-            self.allocator,
+    fn getPRDetails(self: *GitHubClient, pr_number: i64) !PullRequest {
+        var endpoint_buffer: [64]u8 = undefined;
+        const endpoint = try std.fmt.bufPrint(
+            &endpoint_buffer,
             "/repos/NixOS/nixpkgs/pulls/{d}",
             .{pr_number},
         );
-        defer self.allocator.free(endpoint);
 
-        const json_response = try self.makeRequest(io, endpoint);
+        const json_response = try self.makeRequest(endpoint);
         defer self.allocator.free(json_response);
 
-        const parsed = try std.json.parseFromSlice(
-            std.json.Value,
-            self.allocator,
-            json_response,
-            .{},
-        );
+        const parsed = try std.json.parseFromSlice(PullResponse, self.allocator, json_response, json_options);
         defer parsed.deinit();
 
-        const obj = parsed.value.object;
-
-        const title = try self.allocator.dupe(u8, obj.get("title").?.string);
+        const pr = parsed.value;
+        const title = try self.allocator.dupe(u8, pr.title);
         errdefer self.allocator.free(title);
 
-        const base_branch = try self.allocator.dupe(u8, obj.get("base").?.object.get("ref").?.string);
+        const base_branch = try self.allocator.dupe(u8, pr.base.ref);
         errdefer self.allocator.free(base_branch);
 
-        const state = obj.get("state").?.string;
-        const merged = if (obj.get("merged")) |m| m.bool else false;
-
-        const status: PullRequestStatus = if (merged)
+        const status: PullRequestStatus = if (pr.merged)
             .merged
-        else if (std.mem.eql(u8, state, "open"))
+        else if (std.mem.eql(u8, pr.state, "open"))
             .open
         else
             .closed;
 
-        const merge_commit_sha = if (obj.get("merge_commit_sha")) |sha_val|
-            if (sha_val == .null) null else try self.allocator.dupe(u8, sha_val.string)
-        else
-            null;
+        const merge_commit_sha = if (pr.merge_commit_sha) |sha| try self.allocator.dupe(u8, sha) else null;
+        errdefer if (merge_commit_sha) |sha| self.allocator.free(sha);
 
-        const merged_at = if (obj.get("merged_at")) |ma_val|
-            if (ma_val == .null) null else try self.allocator.dupe(u8, ma_val.string)
-        else
-            null;
+        const merged_at = if (pr.merged_at) |date| try self.allocator.dupe(u8, date) else null;
+        errdefer if (merged_at) |date| self.allocator.free(date);
 
-        return PullRequest{
-            .number = pr_number,
+        return .{
+            .number = pr.number,
             .title = title,
             .status = status,
             .base_branch = base_branch,
@@ -314,15 +236,33 @@ pub const GitHubClient = struct {
     }
 };
 
-fn formatIsoDate(allocator: std.mem.Allocator, timestamp: i64) ![]const u8 {
+fn childSucceeded(term: std.process.Child.Term) bool {
+    return switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
+
+fn sanitizeEnv(env: *std.process.Environ.Map) !void {
+    _ = env.swapRemove("GH_FORCE_TTY");
+    _ = env.swapRemove("FORCE_COLOR");
+
+    try env.put("NO_COLOR", "1");
+    try env.put("CLICOLOR", "0");
+    try env.put("CLICOLOR_FORCE", "0");
+    try env.put("GH_NO_UPDATE_NOTIFIER", "1");
+    try env.put("GH_PAGER", "cat");
+}
+
+fn formatIsoDate(buffer: []u8, timestamp: i64) ![]const u8 {
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
     const day_seconds = epoch_seconds.getDaySeconds();
     const year_day = epoch_seconds.getEpochDay().calculateYearDay();
     const month_day = year_day.calculateMonthDay();
 
-    return try std.fmt.allocPrint(
-        allocator,
-        "{d:0>4}-{d:0>2}-{d:0>2}t{d:0>2}:{d:0>2}:{d:0>2}z",
+    return try std.fmt.bufPrint(
+        buffer,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
         .{
             year_day.year,
             month_day.month.numeric(),
@@ -334,19 +274,18 @@ fn formatIsoDate(allocator: std.mem.Allocator, timestamp: i64) ![]const u8 {
     );
 }
 
-fn urlEncode(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    var result: std.Io.Writer.Allocating = .init(allocator);
-    errdefer result.deinit();
+fn writeUrlEncoded(writer: *std.Io.Writer, input: []const u8) !void {
+    const hex = "0123456789ABCDEF";
 
     for (input) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-            try result.writer.writeByte(c);
+            try writer.writeByte(c);
         } else if (c == ' ') {
-            try result.writer.writeByte('+');
+            try writer.writeByte('+');
         } else {
-            try result.writer.print("%{X:0>2}", .{c});
+            try writer.writeByte('%');
+            try writer.writeByte(hex[c >> 4]);
+            try writer.writeByte(hex[c & 0x0f]);
         }
     }
-
-    return result.toOwnedSlice();
 }
