@@ -1,0 +1,52 @@
+[package]
+name = "npr"
+version = "0.2.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "json",
+  "rustls-tls"
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints.clippy]
+complexity = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+
+absolute_paths = "allow"
+arbitrary_source_item_ordering = "allow"
+enum_variant_names = "allow"
+implicit_return = "allow"
+missing_docs_in_private_items = "allow"
+non_ascii_literal = "allow"
+panic = "deny"
+pattern_type_mismatch = "allow"
+print_stdout = "allow"
+question_mark_used = "allow"
+similar_names = "allow"
+single_call_fn = "allow"
+std_instead_of_core = "allow"
+too_long_first_doc_paragraph = "allow"
+too_many_lines = "allow"
+unused_trait_names = "allow"
+unwrap_used = "deny"
+
+expect_used = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+
+[profile.release]
+strip = true
+lto = "fat"
+codegen-units = 1

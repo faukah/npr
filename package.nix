@@ -1,18 +1,16 @@
 {
-  stdenv,
-  zig,
+  lib,
+  rustPlatform,
+  rev ? "dirty",
 }:
-stdenv.mkDerivation (finalAttrs: {
+let
+  cargoToml = lib.importTOML ./Cargo.toml;
+in
+rustPlatform.buildRustPackage {
   pname = "npr";
-  version = "0.1.0";
+  version = "${cargoToml.package.version}-${rev}";
 
   src = ./.;
 
-  nativeBuildInputs = [
-    zig
-  ];
-
-  zigBuildFlags = [
-    "-Doptimize=ReleaseFast"
-  ];
-})
+  cargoLock.lockFile = ./Cargo.lock;
+}

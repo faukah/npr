@@ -1,13 +1,23 @@
 {
-  mkShellNoCC,
-  zig,
-  zls,
+  mkShell,
+  pkg-config,
+  rustc,
+  clippy,
+  rust-analyzer-unwrapped,
+  tombi,
+  rustPlatform,
+  cargo,
+  rustfmt,
 }:
-mkShellNoCC {
-  name = "zig";
-
+mkShell {
   packages = [
-    zig
-    zls
+    pkg-config
+    clippy
+    rustc
+    rust-analyzer-unwrapped
+    (rustfmt.override { asNightly = true; })
+    tombi
+    cargo
   ];
+  env.RUST_SRC_PATH = rustPlatform.rustLibSrc;
 }

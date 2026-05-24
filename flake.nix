@@ -11,6 +11,8 @@
       systems = lib.systems.flakeExposed;
       eachSystem = lib.genAttrs systems;
       pkgsFor = nixpkgs.legacyPackages;
+
+      rev = self.shortRev or self.dirtyShortRev or "dirty";
     in
     {
       devShells = eachSystem (system: {
@@ -18,7 +20,10 @@
       });
 
       packages = eachSystem (system: {
-        npr = pkgsFor.${system}.callPackage ./package.nix { };
+        npr = pkgsFor.${system}.callPackage ./package.nix {
+
+          inherit rev;
+        };
         default = self.packages.${system}.npr;
       });
 
