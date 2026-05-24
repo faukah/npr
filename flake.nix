@@ -20,10 +20,7 @@
       });
 
       packages = eachSystem (system: {
-        npr = pkgsFor.${system}.callPackage ./package.nix {
-
-          inherit rev;
-        };
+        npr = pkgsFor.${system}.callPackage ./package.nix { inherit rev; };
         default = self.packages.${system}.npr;
       });
 
