@@ -1,4 +1,26 @@
-# npr - Nix pull request tracker
+<div align="center">
+  <h1 id="header">npr</h1>
+  <p>A pull request tracker for Nixpkgs.</p>
+  <a alt="CI" href="https://github.com/sisyphean-group/npr/actions">
+    <img
+      src="https://github.com/sisyphean-group/npr/actions/workflows/build.yaml/badge.svg"
+      alt="Build Status"
+    />
+  </a>
+  <a alt="Deps" href="https://deps.rs/repo/github/sisyphean-group/npr">
+    <img
+      src="https://deps.rs/repo/github/sisyphean-group/npr/status.svg"
+      alt="Dependency Status"
+    />
+  </a>
+  <a alt="License" href="https://github.com/sisyphean-group/npr/blob/master/LICENSE">
+    <img
+      src="https://img.shields.io/github/license/sisyphean-group/npr?label=License"
+      alt="License"
+    />
+  </a>
+  <br/>
+</div>
 
 A small handy tool to track GitHub pull requests targeting a package in nixpkgs
 in the last `n` (default: 15) days.
