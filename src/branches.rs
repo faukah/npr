@@ -64,28 +64,37 @@ fn next_branches(branch: &str) -> Vec<String> {
     _ => {},
   }
 
-  if let Some(version) = branch.strip_prefix("staging-next-") {
-    if is_version_number(version) {
-      return vec![format!("release-{version}")];
-    }
-  } else if let Some(version) = branch.strip_prefix("release-") {
-    if is_version_number(version) {
-      return vec![
-        format!("nixpkgs-{version}-darwin"),
-        format!("nixos-{version}-small"),
-      ];
-    }
-  } else if let Some(name) = branch.strip_prefix("nixos-") {
-    if let Some(channel) = name.strip_suffix("-small") {
-      return vec![format!("nixos-{channel}")];
-    }
-  } else if let Some(version) = branch.strip_prefix("staging-")
+  if let Some(version) = branch.strip_prefix("staging-next-")
+    && is_version_number(version)
+  {
+    return vec![format!("release-{version}")];
+  }
+
+  if let Some(version) = branch.strip_prefix("release-")
+    && is_version_number(version)
+  {
+    return vec![
+      format!("nixpkgs-{version}-darwin"),
+      format!("nixos-{version}-small"),
+    ];
+  }
+
+  if let Some(channel) = branch
+    .strip_prefix("nixos-")
+    .and_then(|s| s.strip_suffix("-small"))
+  {
+    return vec![format!("nixos-{channel}")];
+  }
+
+  if let Some(version) = branch.strip_prefix("staging-")
     && let Some(major) = release_major(version)
   {
-    if major <= 20 {
-      return vec![format!("release-{version}")];
-    }
-    return vec![format!("staging-next-{version}")];
+    let prefix = if major <= 20 {
+      "release-"
+    } else {
+      "staging-next-"
+    };
+    return vec![format!("{prefix}{version}")];
   }
 
   Vec::new()
